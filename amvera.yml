@@ -5,5 +5,5 @@ meta:
     version: 3.11
 
 run:
-  command: gunicorn app:app --bind 0.0.0.0:5000
-  containerPort: 5000
+  command: gunicorn simple:simple_app --bind 0.0.0.0:5000 --log-level debug
+  containerPort: 5000git add simple.py amvera.yml
