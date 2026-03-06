@@ -2,7 +2,8 @@ meta:
   environment: python
   toolchain:
     name: pip
+    version: 3.11
 
 run:
-  command: gunicorn --bind 0.0.0.0:5000 app:app
+  command: gunicorn app:app --bind 0.0.0.0:5000
   containerPort: 5000

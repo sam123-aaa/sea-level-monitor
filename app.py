@@ -73,15 +73,12 @@ def health_check():
 def reset_database():
     """Сброс базы данных (для разработки)"""
     try:
-        # Удаляем файл базы данных
         db_path = 'sea_level.db'
         if os.path.exists(db_path):
             os.remove(db_path)
 
-        # Создаем таблицы заново
         with app.app_context():
             Base.metadata.create_all(db.engine)
-            # Инициализируем тестовые данные
             init_test_data(db.session)
 
         return jsonify({'status': 'success', 'message': 'Database reset complete'})
@@ -93,13 +90,9 @@ def reset_database():
 def create_backup():
     """Создание резервной копии данных"""
     try:
-        # Просто копируем файл базы данных
         import shutil
-        from datetime import datetime
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = f"backups/sea_level_backup_{timestamp}.db"
-
         shutil.copy2('sea_level.db', backup_file)
 
         return jsonify({
@@ -125,17 +118,16 @@ def internal_error(error):
 
 if __name__ == '__main__':
     with app.app_context():
-        # Создаем таблицы в БД если их нет
         if not os.path.exists('sea_level.db'):
             Base.metadata.create_all(db.engine)
             init_test_data(db.session)
-            logger.info(" База данных создана и заполнена тестовыми данными")
+            logger.info("База данных создана и заполнена тестовыми данными")
         else:
-            logger.info(" База данных уже существует")
+            logger.info("База данных уже существует")
 
-    # Запускаем приложение
+    # ВАЖНО: порт 5000 для Amvera
     app.run(
         host='0.0.0.0',
-        port=int(os.getenv('PORT', 5000)),
-        debug=os.getenv('DEBUG', 'False').lower() == 'true'
+        port=5000,
+        debug=False
     )
