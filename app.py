@@ -54,7 +54,11 @@ os.makedirs('backups', exist_ok=True)
 @app.route('/')
 def index():
     """Главная страница"""
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Error rendering index: {e}")
+        return f"Error: {e}", 500
 
 
 @app.route('/health')
@@ -93,13 +97,17 @@ def create_backup():
         import shutil
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = f"backups/sea_level_backup_{timestamp}.db"
-        shutil.copy2('sea_level.db', backup_file)
 
-        return jsonify({
-            'status': 'success',
-            'message': 'Backup created successfully',
-            'file': backup_file
-        })
+        if os.path.exists('sea_level.db'):
+            shutil.copy2('sea_level.db', backup_file)
+            return jsonify({
+                'status': 'success',
+                'message': 'Backup created successfully',
+                'file': backup_file
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Database file not found'}), 404
+
     except Exception as e:
         logger.error(f"Backup creation failed: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -116,16 +124,18 @@ def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 
+# Этот блок выполняется только при прямом запуске (не через gunicorn)
 if __name__ == '__main__':
     with app.app_context():
+        # Создаем таблицы если их нет
         if not os.path.exists('sea_level.db'):
             Base.metadata.create_all(db.engine)
             init_test_data(db.session)
-            logger.info("База данных создана и заполнена тестовыми данными")
+            logger.info("✅ База данных создана и заполнена тестовыми данными")
         else:
-            logger.info("База данных уже существует")
+            logger.info("✅ База данных уже существует")
 
-    # ВАЖНО: порт 5000 для Amvera
+    # Запускаем сервер
     app.run(
         host='0.0.0.0',
         port=5000,
