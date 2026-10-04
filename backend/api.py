@@ -1,16 +1,18 @@
 from flask import Blueprint, request, jsonify, current_app
-from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
 from datetime import datetime
 import pandas as pd
 import numpy as np
 import json
 import logging
+import math
+import re
 from .security import token_required, Authentication
 from .models import User, ApiAccessLog
+from .database_config import db
 
 # Создаем Blueprint для API
 api_bp = Blueprint('api', __name__, url_prefix='/api')
-db = SQLAlchemy()
 logger = logging.getLogger(__name__)
 
 
@@ -27,12 +29,13 @@ def log_access(user_id, endpoint, params):
         db.session.commit()
     except Exception as e:
         logger.error(f"Failed to log access: {e}")
+        db.session.rollback()
 
 
 @api_bp.route('/auth/login', methods=['POST'])
 def login():
     """Аутентификация пользователя"""
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = data.get('username')
     password = data.get('password')
 
@@ -42,16 +45,19 @@ def login():
     # Ищем пользователя в БД
     user = User.query.filter_by(username=username).first()
 
-    if user and Authentication.verify_password(password, user.password_hash.encode()):
+    if user and Authentication.verify_password(password,
+            user.password_hash if isinstance(user.password_hash, bytes) else user.password_hash.encode()):
         token = Authentication.generate_token(
             user.user_id,
             user.username,
-            current_app.config['SECRET_KEY']
+            current_app.config['SECRET_KEY'],
+            access_level=user.access_level or 1
         )
         return jsonify({
             'token': token,
             'user_id': user.user_id,
-            'username': user.username
+            'username': user.username,
+            'access_level': user.access_level or 1
         })
 
     return jsonify({'message': 'Invalid credentials'}), 401
@@ -65,38 +71,40 @@ def get_regions_max_rise():
     # Логируем доступ
     log_access(request.user['user_id'], '/api/sea-level/regions/max-rise', request.args)
 
-    # Запрос к БД
-    query = """
-    SELECT 
-        rz.region_name,
-        rz.country,
-        COALESCE(AVG(tgm.relative_change_rate_mm_per_year), 0) as avg_rise_rate,
-        COALESCE(MAX(tgm.mean_sea_level_mm), 0) as max_level,
-        rz.population,
-        rz.risk_level
-    FROM risk_zones rz
-    LEFT JOIN storm_surges ss ON rz.zone_id = ss.region_id
-    LEFT JOIN tide_gauge_measurements tgm ON DATE(tgm.measurement_date) = DATE(ss.event_date)
-    GROUP BY rz.region_name, rz.country, rz.population, rz.risk_level
-    ORDER BY avg_rise_rate DESC
-    LIMIT 10
-    """
-
     try:
-        result = db.engine.execute(query)
+        zones = db.session.execute(text(
+            'SELECT region_name, country, latitude, longitude, population, risk_level FROM risk_zones'
+        )).all()
+        gauges = db.session.execute(text(
+            'SELECT station_id, station_name, latitude, longitude FROM tide_gauges WHERE latitude IS NOT NULL AND longitude IS NOT NULL'
+        )).all()
+        aggregates = db.session.execute(text(
+            'SELECT station_id, AVG(relative_change_rate_mm_per_year), MAX(mean_sea_level_mm) '
+            'FROM tide_gauge_measurements GROUP BY station_id'
+        )).all()
+        by_station = {row[0]: (row[1], row[2]) for row in aggregates}
+
+        def distance_km(lat1, lon1, lat2, lon2):
+            radius = 6371.0
+            a1, a2 = math.radians(lat1), math.radians(lat2)
+            da, db = math.radians(lat2-lat1), math.radians(lon2-lon1)
+            value = math.sin(da/2)**2 + math.cos(a1)*math.cos(a2)*math.sin(db/2)**2
+            return 2*radius*math.asin(min(1, math.sqrt(value)))
 
         regions = []
-        for row in result:
-            regions.append({
-                'region': row[0],
-                'country': row[1],
-                'avg_rise_rate': float(row[2]) if row[2] else 0,
-                'max_level': float(row[3]) if row[3] else 0,
-                'population': row[4],
-                'risk_level': row[5]
-            })
-
-        return jsonify(regions)
+        for zone in zones:
+            closest = None
+            if zone[2] is not None and zone[3] is not None and gauges:
+                closest = min(gauges, key=lambda g: distance_km(zone[2], zone[3], g[2], g[3]))
+            rate, level = by_station.get(closest[0], (None, None)) if closest else (None, None)
+            regions.append({'region': zone[0], 'country': zone[1],
+                'avg_rise_rate': float(rate) if rate is not None else 0,
+                'max_level': float(level) if level is not None else 0,
+                'population': zone[4], 'risk_level': zone[5],
+                'latitude': zone[2], 'longitude': zone[3],
+                'nearest_station': closest[1] if closest else None})
+        regions.sort(key=lambda r: r['avg_rise_rate'], reverse=True)
+        return jsonify(regions[:10])
     except Exception as e:
         logger.error(f"Database query failed: {e}")
         return jsonify({'error': 'Failed to fetch data'}), 500
@@ -116,20 +124,20 @@ def get_port_sea_level_chart(port_name):
         tgm.relative_change_rate_mm_per_year
     FROM tide_gauge_measurements tgm
     JOIN tide_gauges tg ON tg.station_id = tgm.station_id
-    WHERE tg.station_name ILIKE :port_name
+    WHERE LOWER(tg.station_name) LIKE LOWER(:port_name)
     ORDER BY tgm.measurement_date
     """
 
     try:
-        df = pd.read_sql(query, db.engine, params={'port_name': f'%{port_name}%'})
+        df = pd.read_sql(text(query), db.engine, params={'port_name': f'%{port_name}%'})
 
         if df.empty:
             return jsonify({'error': 'Port not found'}), 404
 
         # Создание графика
-        import matplotlib.pyplot as plt
         import matplotlib
         matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
         import os
 
         plt.figure(figsize=(12, 6))
@@ -140,7 +148,8 @@ def get_port_sea_level_chart(port_name):
         plt.grid(True, alpha=0.3)
 
         # Сохраняем график
-        chart_filename = f"{port_name.replace(' ', '_')}_sea_level.png"
+        safe_port_name = re.sub(r'[^A-Za-z0-9_-]+', '_', port_name).strip('_') or 'station'
+        chart_filename = f"{safe_port_name}_sea_level.png"
         chart_path = os.path.join('static', 'charts', chart_filename)
 
         # Создаем папку если её нет
@@ -172,8 +181,14 @@ def get_port_sea_level_chart(port_name):
 def calculate_flooded_areas():
     """Расчет площади земель, которые уйдут под воду при подъеме на 1 метр"""
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     sea_level_rise = data.get('rise_meters', 1.0)  # в метрах
+    try:
+        sea_level_rise = float(sea_level_rise)
+        if not 0 < sea_level_rise <= 100:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'rise_meters must be greater than 0 and at most 100'}), 400
 
     query = """
     SELECT 
@@ -187,7 +202,7 @@ def calculate_flooded_areas():
     """
 
     try:
-        result = db.engine.execute(query, {'sea_level_rise': sea_level_rise})
+        result = db.session.execute(text(query), {'sea_level_rise': sea_level_rise})
 
         total_flooded_area = 0
         affected_population = 0
@@ -228,29 +243,18 @@ def analyze_storm_surges():
     years = request.args.get('years', 5, type=int)
 
     query = """
-    WITH yearly_stats AS (
-        SELECT 
-            EXTRACT(YEAR FROM ss.event_date) as year,
-            COUNT(*) as surge_count,
-            AVG(ss.surge_height_m) as avg_surge_height,
-            AVG(ss.mean_sea_level_at_event_mm) as avg_sea_level
-        FROM storm_surges ss
-        WHERE (:region_id IS NULL OR ss.region_id = :region_id)
-        AND ss.event_date >= CURRENT_DATE - (:years || ' years')::interval
-        GROUP BY EXTRACT(YEAR FROM ss.event_date)
-    )
-    SELECT 
-        year,
-        surge_count,
-        avg_surge_height,
-        avg_sea_level,
-        CORR(surge_count, avg_sea_level) OVER() as correlation
-    FROM yearly_stats
-    ORDER BY year
+    SELECT CAST(strftime('%Y', event_date) AS INTEGER) AS year,
+           COUNT(*) AS surge_count, AVG(surge_height_m) AS avg_surge_height,
+           AVG(mean_sea_level_at_event_mm) AS avg_sea_level
+    FROM storm_surges
+    WHERE (:region_id IS NULL OR region_id = :region_id)
+      AND event_date >= date('now', :period)
+    GROUP BY strftime('%Y', event_date) ORDER BY year
     """
 
     try:
-        result = db.engine.execute(query, {'region_id': region_id, 'years': years})
+        region_id = int(region_id) if region_id else None
+        result = db.session.execute(text(query), {'region_id': region_id, 'period': f'-{max(1, min(years, 100))} years'})
 
         analysis = []
         correlation = None
@@ -262,8 +266,11 @@ def analyze_storm_surges():
                 'avg_surge_height': float(row[2]) if row[2] else 0,
                 'avg_sea_level': float(row[3]) if row[3] else 0
             })
-            if row[4] is not None:
-                correlation = float(row[4])
+        if len(analysis) > 1:
+            counts = [item['surge_count'] for item in analysis]
+            levels = [item['avg_sea_level'] for item in analysis]
+            if np.std(counts) and np.std(levels):
+                correlation = float(np.corrcoef(counts, levels)[0, 1])
 
         return jsonify({
             'region_id': region_id,
@@ -296,7 +303,7 @@ def get_stations():
     """
 
     try:
-        result = db.engine.execute(query)
+        result = db.session.execute(text(query))
 
         stations = []
         for row in result:

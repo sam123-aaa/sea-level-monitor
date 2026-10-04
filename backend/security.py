@@ -58,11 +58,12 @@ class Authentication:
         return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
     @staticmethod
-    def generate_token(user_id, username, secret_key, expires_in=24):
+    def generate_token(user_id, username, secret_key, access_level=1, expires_in=24):
         """Генерация JWT токена"""
         payload = {
             'user_id': user_id,
             'username': username,
+            'access_level': access_level,
             'exp': datetime.utcnow() + timedelta(hours=expires_in)
         }
         return jwt.encode(payload, secret_key, algorithm='HS256')
@@ -160,4 +161,14 @@ def token_required(f):
 
         return f(*args, **kwargs)
 
+    return decorated
+
+
+def admin_required(f):
+    """Require an authenticated administrator for destructive/administrative actions."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not getattr(request, 'user', {}).get('access_level', 0) >= 5:
+            return jsonify({'message': 'Administrator role required'}), 403
+        return f(*args, **kwargs)
     return decorated

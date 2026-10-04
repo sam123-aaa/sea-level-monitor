@@ -1,10 +1,11 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Text
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Text, CheckConstraint, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import os
+import secrets
+from .database_config import db
 
-Base = declarative_base()
+Base = db.Model
 
 
 class TideGauge(Base):
@@ -31,6 +32,11 @@ class TideGaugeMeasurement(Base):
     mean_sea_level_mm = Column(Float)
     relative_change_rate_mm_per_year = Column(Float)
     data_quality_score = Column(Integer)
+
+    __table_args__ = (
+        CheckConstraint('data_quality_score IS NULL OR data_quality_score BETWEEN 1 AND 10', name='ck_measurement_quality'),
+        Index('ix_measurements_station_date', 'station_id', 'measurement_date'),
+    )
 
     station = relationship("TideGauge", back_populates="measurements")
 
@@ -76,6 +82,8 @@ class RiskZone(Base):
     longitude = Column(Float)
     last_assessment_date = Column(Date)
 
+    __table_args__ = (CheckConstraint('risk_level IS NULL OR risk_level BETWEEN 1 AND 5', name='ck_risk_level'),)
+
     storm_surges = relationship("StormSurge", back_populates="region")
 
 
@@ -118,21 +126,20 @@ class ApiAccessLog(Base):
 def init_test_data(db_session):
     """Инициализация тестовых данных"""
 
-    # Проверяем, есть ли уже данные
-    if db_session.query(User).first():
-        return
-
-    # Создаем тестового пользователя
+    # Заполнение идемпотентно: не дублирует справочники и пополняет пустые наборы измерений.
+    configured_user = os.getenv('ADMIN_USERNAME')
+    configured_password = os.getenv('ADMIN_PASSWORD')
+    # Rotate the repository's former demo account without breaking audit-log FKs.
     from backend.security import Authentication
-    hashed = Authentication.hash_password('password123')
-    user = User(
-        username='admin',
-        email='admin@example.com',
-        password_hash=hashed,
-        research_group='Main Lab',
-        access_level=5
-    )
-    db_session.add(user)
+    legacy_user = db_session.query(User).filter_by(username='admin').first()
+    if legacy_user and legacy_user.email == 'admin@example.com':
+        replacement = configured_password if configured_user == 'admin' and configured_password else secrets.token_urlsafe(32)
+        legacy_user.password_hash = Authentication.hash_password(replacement)
+        legacy_user.access_level = 5 if configured_user == 'admin' and configured_password else 1
+    if configured_user and configured_password and not db_session.query(User).filter_by(username=configured_user).first():
+        db_session.add(User(username=configured_user, email=os.getenv('ADMIN_EMAIL', 'admin@localhost'),
+            password_hash=Authentication.hash_password(configured_password),
+            research_group='Main Lab', access_level=5))
 
     # Добавляем тестовые станции
     stations = [
@@ -145,7 +152,11 @@ def init_test_data(db_session):
         TideGauge(station_name='Токио', country='Япония', latitude=35.68, longitude=139.76,
                   ocean_basin='Тихий океан', installation_date=datetime(1995, 1, 1), is_active=True),
     ]
-    db_session.add_all(stations)
+    for station in stations:
+        if not db_session.query(TideGauge).filter_by(station_name=station.station_name).first():
+            db_session.add(station)
+    db_session.flush()
+    stations = db_session.query(TideGauge).order_by(TideGauge.station_id).all()
 
     # Добавляем тестовые зоны риска
     risk_zones = [
@@ -170,7 +181,10 @@ def init_test_data(db_session):
                  critical_infrastructure='Порт, Финансовый центр, Аэропорты',
                  latitude=31.23, longitude=121.47),
     ]
-    db_session.add_all(risk_zones)
+    for zone in risk_zones:
+        if not db_session.query(RiskZone).filter_by(region_name=zone.region_name).first():
+            db_session.add(zone)
+    db_session.flush()
 
     # Добавляем тестовые измерения
     from datetime import timedelta
@@ -179,6 +193,8 @@ def init_test_data(db_session):
     # Измерения для станций
     base_date = datetime(2020, 1, 1)
     for i, station in enumerate(stations):
+        if db_session.query(TideGaugeMeasurement).filter_by(station_id=station.station_id).first():
+            continue
         for year in range(2020, 2025):
             for month in range(1, 13):
                 date = datetime(year, month, 15)
@@ -206,7 +222,28 @@ def init_test_data(db_session):
         Satellite(satellite_name='Sentinel-6', operator='ESA',
                   launch_date=datetime(2020, 11, 21), is_active=True),
     ]
-    db_session.add_all(satellites)
+    for satellite in satellites:
+        if not db_session.query(Satellite).filter_by(satellite_name=satellite.satellite_name).first():
+            db_session.add(satellite)
+    db_session.flush()
+    satellites = db_session.query(Satellite).all()
+
+    # Демонстрационные наблюдения имеют учебное назначение и не являются официальным рядом.
+    if not db_session.query(SatelliteMeasurement).first():
+        for satellite in satellites:
+            for offset, (lat, lon, level) in enumerate([(59.9, 30.3, 515.2), (45.4, 12.3, 522.8), (29.9, -90.0, 518.1)]):
+                db_session.add(SatelliteMeasurement(satellite_id=satellite.satellite_id,
+                    measurement_date=datetime(2024, 1 + offset, 15), latitude=lat,
+                    longitude=lon, sea_level_mm=level + offset, confidence_interval=3.5))
+
+    if not db_session.query(StormSurge).first():
+        zones = db_session.query(RiskZone).all()
+        for idx, zone in enumerate(zones):
+            for year in (2022, 2023, 2024):
+                db_session.add(StormSurge(region_id=zone.zone_id,
+                    event_date=datetime(year, 9, 15), surge_height_m=0.7 + (idx % 3) * 0.25,
+                    mean_sea_level_at_event_mm=510 + 2.1 * (year - 2020),
+                    wind_speed_kmh=65 + 4 * idx, damage_estimate_usd=125000 * (idx + 1)))
 
     db_session.commit()
     print(" Тестовые данные успешно добавлены!")

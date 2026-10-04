@@ -248,10 +248,10 @@
             <div class="login-form">
                 <h2><i class="fas fa-lock"></i> Вход в систему</h2>
                 <div class="form-group">
-                    <input type="text" id="username" placeholder="Имя пользователя" value="admin">
+                    <input type="text" id="username" placeholder="Имя пользователя" autocomplete="username">
                 </div>
                 <div class="form-group">
-                    <input type="password" id="password" placeholder="Пароль" value="password123">
+                    <input type="password" id="password" placeholder="Пароль" autocomplete="current-password">
                 </div>
                 <button class="login-btn" onclick="login()">
                     <i class="fas fa-sign-in-alt"></i> Войти
@@ -372,20 +372,11 @@
                     loadStats();
                     loadRiskZones();
                 } else {
-                    // Если API не работает, используем тестовый режим
-                    console.log("API не доступен, используем тестовый режим");
-                    apiToken = 'test-token';
-                    localStorage.setItem('apiToken', apiToken);
-                    showMainContent();
-                    loadTestData();
+                    alert('Не удалось войти. Проверьте имя пользователя и пароль.');
                 }
             } catch (error) {
                 console.error("Ошибка входа:", error);
-                // Тестовый режим при ошибке
-                apiToken = 'test-token';
-                localStorage.setItem('apiToken', apiToken);
-                showMainContent();
-                loadTestData();
+                alert('Сервис входа временно недоступен. Попробуйте позже.');
             }
         }
 
@@ -404,43 +395,6 @@
         function logout() {
             localStorage.removeItem('apiToken');
             location.reload();
-        }
-
-        function loadTestData() {
-            console.log("Загрузка тестовых данных");
-
-            // Тестовые данные для статистики
-            document.getElementById('max-rise').innerHTML = '8.5 <span class="stat-unit">мм/год</span>';
-            document.getElementById('risk-zones-count').innerHTML = '5 <span class="stat-unit">регионов</span>';
-            document.getElementById('at-risk-population').innerHTML = '3.5M <span class="stat-unit">чел.</span>';
-
-            // Тестовые зоны риска на карте
-            const testZones = [
-                { name: "Венеция", lat: 45.44, lng: 12.34, rise: 8.5, country: "Италия" },
-                { name: "Нидерланды", lat: 52.5, lng: 4.5, rise: 7.2, country: "Нидерланды" },
-                { name: "Мальдивы", lat: 3.2, lng: 73.2, rise: 6.8, country: "Мальдивы" },
-                { name: "Санкт-Петербург", lat: 59.93, lng: 30.32, rise: 3.5, country: "Россия" },
-                { name: "Шанхай", lat: 31.23, lng: 121.47, rise: 4.2, country: "Китай" }
-            ];
-
-            testZones.forEach(zone => {
-                const color = zone.rise > 6 ? 'red' : zone.rise > 4 ? 'orange' : 'yellow';
-                const circle = L.circle([zone.lat, zone.lng], {
-                    color: color,
-                    fillColor: color,
-                    fillOpacity: 0.3,
-                    radius: 100000
-                }).addTo(map);
-
-                circle.bindPopup(`
-                    <b>${zone.name}</b><br>
-                    Страна: ${zone.country}<br>
-                    Скорость подъема: ${zone.rise} мм/год
-                `);
-            });
-
-            // Центрируем карту на Европе
-            map.setView([45, 10], 3);
         }
 
         async function loadStats() {
@@ -464,7 +418,7 @@
                 }
             } catch (error) {
                 console.error("Ошибка загрузки статистики:", error);
-                loadTestData();
+                document.getElementById('max-rise').textContent = 'Нет данных';
             }
         }
 
@@ -488,22 +442,11 @@
                     });
 
                     zones.forEach(zone => {
-                        // Для демо используем координаты из тестовых данных
-                        let lat, lng;
-                        if (zone.region.includes("Венеция")) { lat = 45.44; lng = 12.34; }
-                        else if (zone.region.includes("Нидерланды")) { lat = 52.5; lng = 4.5; }
-                        else if (zone.region.includes("Мальдивы")) { lat = 3.2; lng = 73.2; }
-                        else if (zone.region.includes("Петербург")) { lat = 59.93; lng = 30.32; }
-                        else if (zone.region.includes("Шанхай")) { lat = 31.23; lng = 121.47; }
-                        else {
-                            lat = 30 + Math.random() * 40;
-                            lng = -20 + Math.random() * 80;
-                        }
-
+                        if (zone.latitude == null || zone.longitude == null) return;
                         const color = zone.avg_rise_rate > 6 ? 'red' :
                                      zone.avg_rise_rate > 4 ? 'orange' : 'yellow';
 
-                        const circle = L.circle([lat, lng], {
+                        const circle = L.circle([zone.latitude, zone.longitude], {
                             color: color,
                             fillColor: color,
                             fillOpacity: 0.3,
@@ -514,17 +457,18 @@
                             <b>${zone.region}</b><br>
                             Страна: ${zone.country}<br>
                             Скорость подъема: ${zone.avg_rise_rate.toFixed(1)} мм/год<br>
-                            Население: ${(zone.population || 0).toLocaleString()} чел.
+                            Население: ${(zone.population || 0).toLocaleString()} чел.<br>
+                            Ближайшая станция: ${zone.nearest_station || 'нет данных'}
                         `);
                     });
 
                     map.invalidateSize();
                 } else {
-                    loadTestData();
+                    console.error('Не удалось получить зоны риска из базы данных');
                 }
             } catch (error) {
                 console.error("Ошибка загрузки зон:", error);
-                loadTestData();
+                console.error("Ошибка загрузки зон:", error);
             }
         }
 
@@ -558,15 +502,13 @@
                 } else {
                     document.getElementById('results').innerHTML = `
                         <h3>❌ Порт не найден</h3>
-                        <p>Проверьте название и попробуйте снова</p>
+                        <p>Проверьте название станции в базе данных и попробуйте снова</p>
                     `;
                 }
             } catch (error) {
                 document.getElementById('results').innerHTML = `
                     <h3>❌ Ошибка загрузки</h3>
-                    <p>Используем тестовые данные</p>
-                    <p>Уровень моря: 450 мм</p>
-                    <p>Тренд: +5.2 мм/год</p>
+                    <p>Не удалось прочитать данные из базы. Повторите попытку позже.</p>
                 `;
             }
         }
@@ -597,20 +539,11 @@
                         <p>Затронуто регионов: ${result.regions_count}</p>
                     `;
                 } else {
-                    showTestFloodData(rise);
+                    document.getElementById('results').innerHTML = '<p>Не удалось выполнить расчёт по данным базы.</p>';
                 }
             } catch (error) {
-                showTestFloodData(rise);
+                document.getElementById('results').innerHTML = '<p>Сервис расчёта временно недоступен.</p>';
             }
-        }
-
-        function showTestFloodData(rise) {
-            document.getElementById('results').innerHTML = `
-                <h3>🌊 Затопление при подъеме ${rise}м (тестовые данные)</h3>
-                <p>Площадь затопления: ${(15000 * parseFloat(rise)).toFixed(0)} км²</p>
-                <p>Население в зоне риска: ${(3500000 * parseFloat(rise)).toLocaleString()} чел.</p>
-                <p>Затронуто регионов: ${Math.floor(3 + parseFloat(rise) * 2)}</p>
-            `;
         }
 
         async function loadStations() {
