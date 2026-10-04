@@ -158,9 +158,11 @@ def get_port_sea_level_chart(port_name):
         plt.savefig(chart_path, dpi=100, bbox_inches='tight')
         plt.close()
 
-        # Рассчитываем тренд
-        z = np.polyfit(range(len(df)), df['mean_sea_level_mm'], 1)
-        trend = z[0]  # мм в день
+        # Fit against elapsed calendar days, not row numbers: observations are monthly.
+        elapsed_days = (pd.to_datetime(df['measurement_date']) -
+                        pd.to_datetime(df['measurement_date']).iloc[0]).dt.days.to_numpy()
+        levels = df['mean_sea_level_mm'].to_numpy(dtype=float)
+        trend = float(np.polyfit(elapsed_days, levels, 1)[0]) if len(df) > 1 and elapsed_days[-1] > 0 else 0.0
 
         return jsonify({
             'port_name': port_name,
@@ -169,7 +171,7 @@ def get_port_sea_level_chart(port_name):
             'latest_level': float(df['mean_sea_level_mm'].iloc[-1]),
             'earliest_level': float(df['mean_sea_level_mm'].iloc[0]),
             'total_change': float(df['mean_sea_level_mm'].iloc[-1] - df['mean_sea_level_mm'].iloc[0]),
-            'trend_mm_per_year': float(trend * 365)  # переводим в мм/год
+            'trend_mm_per_year': float(trend * 365.25)
         })
     except Exception as e:
         logger.error(f"Failed to generate chart: {e}")
