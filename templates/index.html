@@ -213,6 +213,17 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
 
+        .live-toolbar, .live-report {
+            background: white; padding: 18px 22px; border-radius: 14px;
+            margin: 0 0 18px; box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        }
+        .live-toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+        .live-toolbar button { padding:10px 15px; border:0; border-radius:8px; cursor:pointer; font-weight:600; }
+        .live-report { line-height:1.55; color:#27324a; }
+        .live-report h3 { margin-bottom:8px; }
+        .live-report ul { margin:8px 0 0 20px; }
+        .live-muted { color:#64748b; font-size:13px; }
+
         .results {
             background: white;
             padding: 25px;
@@ -280,15 +291,15 @@
 
             <div class="stats-grid" id="stats-container">
                 <div class="stat-card">
-                    <h3>📈 Максимальный подъем</h3>
+                    <h3>📈 Подъем (учебная БД)</h3>
                     <div class="stat-value" id="max-rise">Загрузка...</div>
                 </div>
                 <div class="stat-card">
-                    <h3>⚠️ Зоны риска</h3>
+                    <h3>⚠️ Зоны справочника</h3>
                     <div class="stat-value" id="risk-zones-count">Загрузка...</div>
                 </div>
                 <div class="stat-card">
-                    <h3>👥 Население в зоне риска</h3>
+                    <h3>👥 Население справочника</h3>
                     <div class="stat-value" id="at-risk-population">Загрузка...</div>
                 </div>
             </div>
@@ -302,8 +313,16 @@
                     </button>
                 </div>
             </div>
+            <div class="live-report"><b>Важно:</b> исторические ряды и оценка населения в учебной базе являются демонстрационными. Текущие погодные данные ниже поступают из внешних источников; они не означают автоматически, что в местности уже происходит подтопление.</div>
+
+            <div class="live-toolbar">
+                <button class="btn-primary" onclick="loadLiveConditions()">🌦️ Обновить реальные условия</button>
+                <button class="btn-secondary" id="radar-toggle" onclick="toggleRainRadar()">🌧️ Показать радар осадков</button>
+                <span class="live-muted">Погода обновляется примерно раз в 10 минут; радар показывает время выбранного кадра.</span>
+            </div>
 
             <div id="map"></div>
+            <div id="live-report" class="live-report">Войдите в систему и нажмите «Обновить реальные условия».</div>
             <div id="error-container"></div>
             <div class="results" id="results" style="display: none;"></div>
         </div>
@@ -313,6 +332,12 @@
     <script>
         let map;
         let apiToken = localStorage.getItem('apiToken');
+        let liveWeatherLayer = null;
+        let gaugeLayer = null;
+        let radarLayer = null;
+        let radarEnabled = false;
+        let liveRefreshTimer = null;
+        let radarRefreshTimer = null;
 
         // Инициализация при загрузке
         window.onload = function() {
@@ -321,6 +346,7 @@
             if (apiToken) {
                 showMainContent();
                 loadStats();
+                loadLiveConditions();
             }
         };
 
@@ -371,6 +397,7 @@
                     showMainContent();
                     loadStats();
                     loadRiskZones();
+                    loadLiveConditions();
                 } else {
                     alert('Не удалось войти. Проверьте имя пользователя и пароль.');
                 }
@@ -390,6 +417,7 @@
                     map.invalidateSize();
                 }
             }, 200);
+            if (!liveRefreshTimer) liveRefreshTimer = setInterval(loadLiveConditions, 10 * 60 * 1000);
         }
 
         function logout() {
@@ -443,8 +471,7 @@
 
                     zones.forEach(zone => {
                         if (zone.latitude == null || zone.longitude == null) return;
-                        const color = zone.avg_rise_rate > 6 ? 'red' :
-                                     zone.avg_rise_rate > 4 ? 'orange' : 'yellow';
+                        const color = '#64748b';
 
                         const circle = L.circle([zone.latitude, zone.longitude], {
                             color: color,
@@ -456,9 +483,10 @@
                         circle.bindPopup(`
                             <b>${zone.region}</b><br>
                             Страна: ${zone.country}<br>
-                            Скорость подъема: ${zone.avg_rise_rate.toFixed(1)} мм/год<br>
-                            Население: ${(zone.population || 0).toLocaleString()} чел.<br>
-                            Ближайшая станция: ${zone.nearest_station || 'нет данных'}
+                            Справочная зона мониторинга.<br>
+                            Учебная оценка тренда в БД: ${zone.avg_rise_rate.toFixed(1)} мм/год<br>
+                            Население справочника: ${(zone.population || 0).toLocaleString()} чел.<br>
+                            Это не текущие показания датчика. Нажмите «Обновить реальные условия».
                         `);
                     });
 
@@ -544,6 +572,122 @@
             } catch (error) {
                 document.getElementById('results').innerHTML = '<p>Сервис расчёта временно недоступен.</p>';
             }
+        }
+
+        function precipitationColor(mm) {
+            if (mm === null || mm === undefined || !Number.isFinite(Number(mm))) return '#64748b';
+            if (Number(mm) >= 10) return '#7c3aed';
+            if (Number(mm) >= 2.5) return '#dc2626';
+            if (Number(mm) >= 0.2) return '#f59e0b';
+            return '#16a34a';
+        }
+
+        function formatUtc(value) {
+            if (!value) return 'время не указано';
+            const date = new Date(value.endsWith('Z') ? value : value + 'Z');
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { timeZone: 'UTC', hour12: false }) + ' UTC';
+        }
+
+        async function loadLiveConditions() {
+            const report = document.getElementById('live-report');
+            report.innerHTML = '<h3>Загружаю погодные данные и показания доступных уровнемеров…</h3>';
+            try {
+                const response = await fetch('/api/live/conditions', { headers: { 'Authorization': `Bearer ${apiToken}` } });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Провайдер временно недоступен');
+
+                if (liveWeatherLayer) map.removeLayer(liveWeatherLayer);
+                if (gaugeLayer) map.removeLayer(gaugeLayer);
+                liveWeatherLayer = L.layerGroup().addTo(map);
+                gaugeLayer = L.layerGroup().addTo(map);
+                const lines = [];
+
+                result.zones.forEach(zone => {
+                    const w = zone.weather;
+                    if (w && zone.latitude != null && zone.longitude != null) {
+                        const mm = w.rain_mm == null ? null : Number(w.rain_mm);
+                        const color = precipitationColor(mm);
+                        const rainCircle = L.circleMarker([zone.latitude, zone.longitude], {
+                            radius: 13, color, fillColor: color, fillOpacity: 0.72, weight: 2
+                        }).addTo(liveWeatherLayer);
+                        rainCircle.bindPopup(`<b>${zone.region}, ${zone.country}</b><br>Модельные осадки за предыдущие 15 минут: ${w.precipitation_mm ?? 'нет данных'} мм<br>Дождь: ${w.rain_mm ?? 'нет данных'} мм<br>Температура: ${w.temperature_c ?? '—'} °C<br>Ветер: ${w.wind_kmh ?? '—'} км/ч<br>Модельное время: ${formatUtc(w.time)}<br>Источник: Open-Meteo`);
+                        lines.push(`<li><b>${zone.region}</b>: дождь по модели ${w.rain_mm ?? 'нет данных'} мм за 15 мин., все осадки ${w.precipitation_mm ?? '—'} мм; температура ${w.temperature_c ?? '—'} °C. Open-Meteo, ${formatUtc(w.time)}.</li>`);
+                    } else {
+                        lines.push(`<li><b>${zone.region}</b>: погодный источник временно не ответил.</li>`);
+                    }
+
+                    const g = zone.water_gauge;
+                    if (g && g.available && g.latitude != null && g.longitude != null) {
+                        const above = g.level_mhhw_m;
+                        const threshold = g.nos_minor_m;
+                        const gaugeColor = threshold != null && above >= threshold ? '#dc2626' : '#2563eb';
+                        const marker = L.circleMarker([g.latitude, g.longitude], {
+                            radius: 8, color: '#fff', weight: 2, fillColor: gaugeColor, fillOpacity: 1
+                        }).addTo(gaugeLayer);
+                        marker.bindPopup(`<b>NOAA CO-OPS: ${g.station}</b><br>Уровень относительно MHHW: ${above} м<br>Порог NOS Minor: ${threshold ?? 'нет'} м<br>Статус: ${g.status}<br>Наблюдение: ${formatUtc(g.time)}<br>До зоны ${zone.region}: ${g.distance_km} км`);
+                        lines.push(`<li><b>${zone.region}</b>: ближайший уровнемер NOAA — ${g.station} (${g.distance_km} км), уровень ${above} м относительно MHHW; статус: ${g.status}, наблюдение ${formatUtc(g.time)}.</li>`);
+                    } else if (g) {
+                        lines.push(`<li><b>${zone.region}</b>: ближайшая станция NOAA ${g.station || ''}, но текущее измерение недоступно.</li>`);
+                    } else {
+                        lines.push(`<li><b>${zone.region}</b>: в радиусе 100 км нет подходящей станции NOAA с официальными порогами.</li>`);
+                    }
+                });
+
+                (result.stations || []).forEach(station => {
+                    const g = station.water_gauge;
+                    if (!g || !g.available || g.latitude == null || g.longitude == null) return;
+                    const color = g.nos_minor_m != null && g.level_mhhw_m >= g.nos_minor_m ? '#dc2626' : '#2563eb';
+                    const marker = L.circleMarker([g.latitude, g.longitude], {
+                        radius: 9, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1
+                    }).addTo(gaugeLayer);
+                    marker.bindPopup(`<b>Фактический уровнемер NOAA CO-OPS</b><br>${g.station} (станция проекта: ${station.name}, ${station.country})<br>Уровень относительно MHHW: ${g.level_mhhw_m} м<br>Порог NOS Minor: ${g.nos_minor_m ?? 'нет'} м<br>Статус: ${g.status}<br>Наблюдение: ${formatUtc(g.time)}`);
+                    lines.push(`<li><b>Станция проекта ${station.name}</b>: ближайший датчик NOAA CO-OPS ${g.station}; измеренный уровень ${g.level_mhhw_m} м относительно MHHW, статус ${g.status} (время ${formatUtc(g.time)}).</li>`);
+                });
+
+                report.innerHTML = `<h3>Текущие погодные условия</h3><div class="live-muted">Ответ сервера: ${formatUtc(result.updated_at)}. Цвет точек — дождь за предшествующие 15 минут по погодной модели: <span style="color:#16a34a">●</span> нет/следы, <span style="color:#f59e0b">●</span> от 0,2 мм, <span style="color:#dc2626">●</span> от 2,5 мм, <span style="color:#7c3aed">●</span> от 10 мм. Синий/красный значок — фактический датчик NOAA относительно официального порога.</div><ul>${lines.join('')}</ul><p class="live-muted">Источники: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo (погодная модель)</a>; <a href="https://tidesandcurrents.noaa.gov/" target="_blank" rel="noopener">NOAA CO-OPS (уровнемеры)</a>. Радарные осадки и модельные значения — разные источники. Отсутствие радара или датчика не означает отсутствие дождя/подтопления. Это мониторинг условий, не прогноз вероятности затопления.</p>`;
+            } catch (error) {
+                report.innerHTML = `<h3>Не удалось обновить реальные данные</h3><p>${error.message}. Повторите попытку позже; предыдущие данные сайта не следует считать текущими.</p>`;
+            }
+        }
+
+        async function toggleRainRadar() {
+            const button = document.getElementById('radar-toggle');
+            if (radarEnabled && radarLayer) {
+                map.removeLayer(radarLayer);
+                radarEnabled = false;
+                if (radarRefreshTimer) clearInterval(radarRefreshTimer);
+                radarRefreshTimer = null;
+                button.textContent = '🌧️ Показать радар осадков';
+                return;
+            }
+            button.textContent = 'Загружаю радар…';
+            try {
+                const frame = await refreshRadarLayer();
+                radarEnabled = true;
+                button.textContent = 'Скрыть радар осадков';
+                radarRefreshTimer = setInterval(async () => {
+                    try { await refreshRadarLayer(); }
+                    catch (error) { document.getElementById('live-report').insertAdjacentHTML('afterbegin', '<p>Не удалось обновить кадр радара; показанный слой устаревает.</p>'); }
+                }, 10 * 60 * 1000);
+                document.getElementById('live-report').insertAdjacentHTML('afterbegin', `<p><b>Радар RainViewer.</b> Время кадра: ${formatUtc(new Date(frame.time * 1000).toISOString())}. Это композитные радарные данные в пределах доступного покрытия.</p>`);
+            } catch (error) {
+                button.textContent = '🌧️ Показать радар осадков';
+                document.getElementById('live-report').insertAdjacentHTML('afterbegin', `<p>Радар недоступен: ${error.message}.</p>`);
+            }
+        }
+
+        async function refreshRadarLayer() {
+            const response = await fetch('/api/live/radar', { headers: { 'Authorization': `Bearer ${apiToken}` } });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Радар временно недоступен');
+            const frame = data.frames[data.frames.length - 1];
+            const tileUrl = `${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
+            if (radarLayer) map.removeLayer(radarLayer);
+            radarLayer = L.tileLayer(tileUrl, {
+                opacity: 0.68, maxNativeZoom: 7, maxZoom: 18,
+                attribution: '<a href="https://www.rainviewer.com/" target="_blank" rel="noopener">Weather data by RainViewer</a>'
+            }).addTo(map);
+            return frame;
         }
 
         async function loadStations() {

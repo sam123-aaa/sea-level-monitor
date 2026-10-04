@@ -10,10 +10,33 @@ import re
 from .security import token_required, Authentication
 from .models import User, ApiAccessLog
 from .database_config import db
+from .live_data import live_conditions, radar_metadata
 
 # Создаем Blueprint для API
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 logger = logging.getLogger(__name__)
+
+
+@api_bp.route('/live/conditions', methods=['GET'])
+@token_required
+def get_live_conditions():
+    """Current modeled weather and nearest observed NOAA coastal water level."""
+    try:
+        return jsonify(live_conditions())
+    except Exception as e:
+        logger.exception("Live conditions service unavailable")
+        return jsonify({'error': 'Live data providers are temporarily unavailable', 'detail': str(e)}), 503
+
+
+@api_bp.route('/live/radar', methods=['GET'])
+@token_required
+def get_live_radar():
+    """Cached RainViewer radar frame metadata for the browser's map layer."""
+    try:
+        return jsonify(radar_metadata())
+    except Exception as e:
+        logger.exception("RainViewer metadata unavailable")
+        return jsonify({'error': 'Radar data is temporarily unavailable', 'detail': str(e)}), 503
 
 
 def log_access(user_id, endpoint, params):
