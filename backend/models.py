@@ -136,10 +136,18 @@ def init_test_data(db_session):
         replacement = configured_password if configured_user == 'admin' and configured_password else secrets.token_urlsafe(32)
         legacy_user.password_hash = Authentication.hash_password(replacement)
         legacy_user.access_level = 5 if configured_user == 'admin' and configured_password else 1
-    if configured_user and configured_password and not db_session.query(User).filter_by(username=configured_user).first():
-        db_session.add(User(username=configured_user, email=os.getenv('ADMIN_EMAIL', 'admin@localhost'),
-            password_hash=Authentication.hash_password(configured_password),
-            research_group='Main Lab', access_level=5))
+    if configured_user and configured_password:
+        configured_account = db_session.query(User).filter_by(username=configured_user).first()
+        if configured_account:
+            stored_hash = configured_account.password_hash
+            stored_hash = stored_hash if isinstance(stored_hash, bytes) else stored_hash.encode()
+            if not Authentication.verify_password(configured_password, stored_hash):
+                configured_account.password_hash = Authentication.hash_password(configured_password)
+            configured_account.access_level = 5
+        else:
+            db_session.add(User(username=configured_user, email=os.getenv('ADMIN_EMAIL', 'admin@localhost'),
+                password_hash=Authentication.hash_password(configured_password),
+                research_group='Main Lab', access_level=5))
 
     # Добавляем тестовые станции
     stations = [
