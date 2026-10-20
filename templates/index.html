@@ -305,14 +305,16 @@
             </div>
 
             <div class="control-panel">
-                <h3>🔍 Поиск порта</h3>
+                <h3>🔍 Поиск региона или станции</h3>
                 <div class="control-row">
-                    <input type="text" id="port-search" placeholder="Введите название порта (например, Венеция)">
+                    <input type="search" id="port-search" maxlength="100" list="location-hints" placeholder="Санкт-Петербург, Шанхай, Каспийск…" aria-label="Регион или станция" onkeydown="if(event.key === 'Enter') searchPort()"><datalist id="location-hints"></datalist>
                     <button class="btn-primary" onclick="searchPort()">
                         <i class="fas fa-search"></i> Найти
                     </button>
+                    <button class="btn-secondary" onclick="showAllLocations()">Показать все</button>
                 </div>
             </div>
+            <div id="location-results" class="live-report" aria-live="polite" style="max-height:340px;overflow:auto"></div>
             <div class="live-report"><b>Важно:</b> исторические ряды и оценка населения в учебной базе являются демонстрационными. Текущие погодные данные ниже поступают из внешних источников; они не означают автоматически, что в местности уже происходит подтопление.</div>
 
             <div class="live-toolbar">
@@ -346,6 +348,8 @@
             if (apiToken) {
                 showMainContent();
                 loadStats();
+                loadRiskZones();
+                searchPort('', false);
                 loadLiveConditions();
             }
         };
@@ -397,6 +401,7 @@
                     showMainContent();
                     loadStats();
                     loadRiskZones();
+                    searchPort('', false);
                     loadLiveConditions();
                 } else {
                     alert('Не удалось войти. Проверьте имя пользователя и пароль.');
@@ -435,7 +440,7 @@
                     const data = await response.json();
                     if (data && data.length > 0) {
                         document.getElementById('max-rise').innerHTML =
-                            `${data[0].avg_rise_rate.toFixed(1)} <span class="stat-unit">мм/год</span>`;
+                            `${data[0].avg_rise_rate == null ? 'Нет ряда' : data[0].avg_rise_rate.toFixed(1)} <span class="stat-unit">мм/год</span>`;
                         document.getElementById('risk-zones-count').innerHTML =
                             `${data.length} <span class="stat-unit">регионов</span>`;
 
@@ -484,7 +489,7 @@
                             <b>${zone.region}</b><br>
                             Страна: ${zone.country}<br>
                             Справочная зона мониторинга.<br>
-                            Учебная оценка тренда в БД: ${zone.avg_rise_rate.toFixed(1)} мм/год<br>
+                            Учебная оценка тренда в БД: ${zone.avg_rise_rate == null ? 'нет ряда станции в радиусе 100 км' : zone.avg_rise_rate.toFixed(1) + ' мм/год'}<br>
                             Население справочника: ${(zone.population || 0).toLocaleString()} чел.<br>
                             Это не текущие показания датчика. Нажмите «Обновить реальные условия».
                         `);
@@ -500,44 +505,97 @@
             }
         }
 
-        async function searchPort() {
-            const port = document.getElementById('port-search').value;
-            if (!port) {
-                alert('Введите название порта');
-                return;
-            }
-
-            document.getElementById('results').style.display = 'block';
-            document.getElementById('results').innerHTML = `
-                <h3>Порт: ${port}</h3>
-                <p>Данные загружаются...</p>
-            `;
-
+        let searchSequence = 0;
+        let chartSequence = 0;
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+        function showAllLocations() {
+            document.getElementById('port-search').value = '';
+            searchPort('');
+        }
+        async function searchPort(value, focus = true) {
+            const query = (value ?? document.getElementById('port-search').value).trim();
+            const sequence = ++searchSequence;
+            ++chartSequence;
+            const panel = document.getElementById('location-results');
+            panel.textContent = 'Поиск в справочнике…';
+            // Discard the previous city's chart immediately, even on an unsuccessful search.
+            document.getElementById('results').replaceChildren();
+            document.getElementById('results').style.display = 'none';
             try {
-                const response = await fetch(`/api/sea-level/port/${encodeURIComponent(port)}`, {
-                    headers: { 'Authorization': `Bearer ${apiToken}` }
+                const response = await fetch('/api/locations?q=' + encodeURIComponent(query), {
+                    headers: {Authorization: `Bearer ${apiToken}`}
                 });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    document.getElementById('results').innerHTML = `
-                        <h3>📊 Порт: ${data.port_name}</h3>
-                        <p>Текущий уровень: ${data.latest_level} мм</p>
-                        <p>Изменение: ${data.total_change > 0 ? '+' : ''}${data.total_change} мм</p>
-                        <p>Тренд: ${data.trend_mm_per_year.toFixed(1)} мм/год</p>
-                        ${data.chart_url ? `<img src="${data.chart_url}" style="max-width: 100%; margin-top: 10px;">` : ''}
-                    `;
-                } else {
-                    document.getElementById('results').innerHTML = `
-                        <h3>❌ Порт не найден</h3>
-                        <p>Проверьте название станции в базе данных и попробуйте снова</p>
-                    `;
+                if (sequence !== searchSequence) return;
+                if (response.status === 401) throw new Error('Сессия истекла. Выйдите и войдите снова.');
+                if (!response.ok) throw new Error('Справочник временно недоступен. Повторите попытку.');
+                const data = await response.json();
+                if (sequence !== searchSequence) return;
+                if (!query) {
+                    document.getElementById('location-hints').replaceChildren(...data.items.map(item => {
+                        const option = document.createElement('option'); option.value = item.name; return option;
+                    }));
+                }
+                panel.innerHTML = `<h3>${query ? 'Результаты поиска' : 'Все регионы и станции'}: ${data.count}</h3>`;
+                if (!data.count) {
+                    const message = document.createElement('p');
+                    message.textContent = `«${query}» нет в справочнике. Выберите подсказку или нажмите «Показать все».`;
+                    panel.append(message);
+                }
+                data.items.forEach(item => {
+                    const card = document.createElement('div');
+                    card.style.cssText = 'margin:12px 0;padding:12px;background:#f3f6fa;border-radius:8px';
+                    card.innerHTML = `<b>${escapeHtml(item.name)}</b> · ${escapeHtml(item.country)}<br>
+                        ${item.kind === 'region' ? 'Регион мониторинга' : 'Станция'}.
+                        ${item.measurement_count ? `Учебный ряд: ${item.measurement_count} записей; станция ${escapeHtml(item.station_name)}${item.kind === 'region' ? ', расстояние ' + item.station_distance_km + ' км' : ''}.` : 'Исторический ряд отсутствует. Текущую погоду для региона можно проверить кнопкой «Обновить реальные условия».'}`;
+                    const button = document.createElement('button');
+                    button.className = 'btn-secondary'; button.style.marginTop = '8px';
+                    button.textContent = item.measurement_count ? 'Показать на карте и открыть ряд' : 'Показать на карте';
+                    button.addEventListener('click', () => openLocation(item));
+                    card.append(document.createElement('br'), button); panel.append(card);
+                });
+                if (query && data.items.length === 1) await openLocation(data.items[0]);
+                else if (query && data.items.length > 1 && map) {
+                    const points = data.items.filter(i => i.latitude != null && i.longitude != null).map(i => [i.latitude,i.longitude]);
+                    if (points.length) map.fitBounds(points, {maxZoom:9, padding:[25,25]});
                 }
             } catch (error) {
-                document.getElementById('results').innerHTML = `
-                    <h3>❌ Ошибка загрузки</h3>
-                    <p>Не удалось прочитать данные из базы. Повторите попытку позже.</p>
-                `;
+                if (sequence === searchSequence) panel.textContent = error.message;
+            }
+        }
+        async function openLocation(item) {
+            const sequence = searchSequence;
+            const chartRequest = ++chartSequence;
+            const panel = document.getElementById('results');
+            panel.style.display = 'block';
+            panel.innerHTML = `<h3>${escapeHtml(item.name)}</h3>`;
+            if (map && item.latitude != null && item.longitude != null) {
+                map.setView([item.latitude,item.longitude], 10);
+                L.popup().setLatLng([item.latitude,item.longitude]).setContent(escapeHtml(item.name)).openOn(map);
+            }
+            if (!item.measurement_count) {
+                panel.insertAdjacentHTML('beforeend','<p>Исторические измерения для этого региона не загружены. Данные удалённых станций не подставляются.</p>');
+                if (item.name.includes('Каспийск')) panel.insertAdjacentHTML('beforeend','<p>Каспийское море — замкнутый водоём; тренд Мирового океана для него не применяется.</p>');
+                return;
+            }
+            panel.insertAdjacentHTML('beforeend','<p>Загружаю учебный ряд станции…</p>');
+            try {
+                const response = await fetch('/api/sea-level/port/' + encodeURIComponent(item.station_name), {
+                    headers: {Authorization: `Bearer ${apiToken}`}
+                });
+                if (sequence !== searchSequence || chartRequest !== chartSequence) return;
+                if (response.status === 401) throw new Error('Сессия истекла. Войдите снова.');
+                if (!response.ok) throw new Error('Не удалось получить исторический ряд станции.');
+                const data = await response.json();
+                if (sequence !== searchSequence || chartRequest !== chartSequence) return;
+                panel.innerHTML = `<h3>${escapeHtml(item.name)}</h3><p>Станция: ${escapeHtml(data.station_name)}. Учебный ряд, ${data.data_points} записей.</p>
+                    <p>Последнее значение в ряду: ${data.latest_level} мм (${escapeHtml(data.latest_date)}).</p>
+                    <p>Изменение за период: ${data.total_change.toFixed(1)} мм. Линейный тренд: ${data.trend_mm_per_year.toFixed(1)} мм/год.</p>
+                    <p>Это демонстрационные исторические данные, а не текущий уровень воды.</p>
+                    <img src="${escapeHtml(data.chart_url)}" alt="Учебный график станции ${escapeHtml(data.station_name)}" style="max-width:100%">`;
+            } catch (error) {
+                if (sequence === searchSequence && chartRequest === chartSequence) panel.textContent = error.message;
             }
         }
 

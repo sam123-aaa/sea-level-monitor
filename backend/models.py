@@ -188,6 +188,10 @@ def init_test_data(db_session):
                  avg_elevation_m=4.0, population=24000000, risk_level=4,
                  critical_infrastructure='Порт, Финансовый центр, Аэропорты',
                  latitude=31.23, longitude=121.47),
+        # Only reference coordinates are supplied; no invented history or risk assessment.
+        RiskZone(region_name='Каспийск (Каспийское море)', country='Россия',
+                 latitude=42.88165, longitude=47.63919,
+                 critical_infrastructure='Прибрежная городская территория'),
     ]
     for zone in risk_zones:
         if not db_session.query(RiskZone).filter_by(region_name=zone.region_name).first():

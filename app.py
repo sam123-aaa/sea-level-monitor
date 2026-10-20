@@ -68,7 +68,7 @@ def health_check():
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'database': 'sqlite',
-        'version': '1.0.0'
+        'version': '1.1.0'
     }
     return jsonify(status)
 

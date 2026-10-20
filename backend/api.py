@@ -11,6 +11,7 @@ from .security import token_required, Authentication
 from .models import User, ApiAccessLog
 from .database_config import db
 from .live_data import live_conditions, radar_metadata
+from .location_search import catalogue, normalize_name, distance_km
 
 # Создаем Blueprint для API
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -107,30 +108,35 @@ def get_regions_max_rise():
         )).all()
         by_station = {row[0]: (row[1], row[2]) for row in aggregates}
 
-        def distance_km(lat1, lon1, lat2, lon2):
-            radius = 6371.0
-            a1, a2 = math.radians(lat1), math.radians(lat2)
-            da, db = math.radians(lat2-lat1), math.radians(lon2-lon1)
-            value = math.sin(da/2)**2 + math.cos(a1)*math.cos(a2)*math.sin(db/2)**2
-            return 2*radius*math.asin(min(1, math.sqrt(value)))
-
         regions = []
         for zone in zones:
             closest = None
             if zone[2] is not None and zone[3] is not None and gauges:
                 closest = min(gauges, key=lambda g: distance_km(zone[2], zone[3], g[2], g[3]))
+                if distance_km(zone[2], zone[3], closest[2], closest[3]) > 100:
+                    closest = None
             rate, level = by_station.get(closest[0], (None, None)) if closest else (None, None)
             regions.append({'region': zone[0], 'country': zone[1],
-                'avg_rise_rate': float(rate) if rate is not None else 0,
-                'max_level': float(level) if level is not None else 0,
+                'avg_rise_rate': float(rate) if rate is not None else None,
+                'max_level': float(level) if level is not None else None,
                 'population': zone[4], 'risk_level': zone[5],
                 'latitude': zone[2], 'longitude': zone[3],
                 'nearest_station': closest[1] if closest else None})
-        regions.sort(key=lambda r: r['avg_rise_rate'], reverse=True)
-        return jsonify(regions[:10])
+        regions.sort(key=lambda r: (r['avg_rise_rate'] is not None, r['avg_rise_rate'] or 0), reverse=True)
+        return jsonify(regions)
     except Exception as e:
         logger.error(f"Database query failed: {e}")
         return jsonify({'error': 'Failed to fetch data'}), 500
+
+
+@api_bp.route('/locations', methods=['GET'])
+@token_required
+def search_locations():
+    query = request.args.get('q', '').strip()
+    if len(query) > 100:
+        return jsonify({'error': 'Запрос должен содержать не более 100 символов'}), 400
+    items = catalogue(query)
+    return jsonify({'query': query, 'count': len(items), 'items': items})
 
 
 @api_bp.route('/sea-level/port/<port_name>', methods=['GET'])
@@ -147,12 +153,22 @@ def get_port_sea_level_chart(port_name):
         tgm.relative_change_rate_mm_per_year
     FROM tide_gauge_measurements tgm
     JOIN tide_gauges tg ON tg.station_id = tgm.station_id
-    WHERE LOWER(tg.station_name) LIKE LOWER(:port_name)
+    WHERE tg.station_id = :station_id
     ORDER BY tgm.measurement_date
     """
 
     try:
-        df = pd.read_sql(text(query), db.engine, params={'port_name': f'%{port_name}%'})
+        found = catalogue(port_name)
+        exact = [item for item in found if normalize_name(item['name']) == normalize_name(port_name)]
+        choices = exact or found
+        ids = {item['station_id'] for item in choices if item['station_id'] is not None}
+        if len(ids) > 1:
+            return jsonify({'error': 'Уточните станцию', 'matches': choices}), 409
+        if not ids:
+            return jsonify({'error': 'Исторический ряд для этого места отсутствует', 'matches': choices}), 404
+        station_id = ids.pop()
+        station_name = next(item['station_name'] for item in choices if item['station_id'] == station_id)
+        df = pd.read_sql(text(query), db.engine, params={'station_id': station_id})
 
         if df.empty:
             return jsonify({'error': 'Port not found'}), 404
@@ -165,13 +181,13 @@ def get_port_sea_level_chart(port_name):
 
         plt.figure(figsize=(12, 6))
         plt.plot(pd.to_datetime(df['measurement_date']), df['mean_sea_level_mm'], 'b-', linewidth=2)
-        plt.title(f'Уровень моря в порту {port_name}')
+        plt.title(f'Учебный ряд станции {station_name}')
         plt.xlabel('Дата')
         plt.ylabel('Уровень моря (мм)')
         plt.grid(True, alpha=0.3)
 
         # Сохраняем график
-        safe_port_name = re.sub(r'[^A-Za-z0-9_-]+', '_', port_name).strip('_') or 'station'
+        safe_port_name = f'station_{station_id}'
         chart_filename = f"{safe_port_name}_sea_level.png"
         chart_path = os.path.join('static', 'charts', chart_filename)
 
@@ -189,6 +205,9 @@ def get_port_sea_level_chart(port_name):
 
         return jsonify({
             'port_name': port_name,
+            'station_name': station_name,
+            'data_source': 'demonstration',
+            'latest_date': str(df['measurement_date'].iloc[-1]),
             'chart_url': f'/static/charts/{chart_filename}',
             'data_points': len(df),
             'latest_level': float(df['mean_sea_level_mm'].iloc[-1]),
