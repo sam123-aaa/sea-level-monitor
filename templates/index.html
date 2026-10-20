@@ -191,7 +191,7 @@
             flex-wrap: wrap;
         }
 
-        select, input[type="text"] {
+        select, input[type="text"], input[type="search"] {
             padding: 10px 15px;
             border: 2px solid #e0e0e0;
             border-radius: 8px;
@@ -223,6 +223,10 @@
         .live-report h3 { margin-bottom:8px; }
         .live-report ul { margin:8px 0 0 20px; }
         .live-muted { color:#64748b; font-size:13px; }
+        .control-row button, #location-results button {
+            padding: 10px 16px; border: 0; border-radius: 8px;
+            font-size: 14px; cursor: pointer;
+        }
 
         .results {
             background: white;
@@ -514,7 +518,7 @@
             document.getElementById('port-search').value = '';
             searchPort('');
         }
-        async function searchPort(value, focus = true) {
+        async function searchPort(value) {
             const query = (value ?? document.getElementById('port-search').value).trim();
             const sequence = ++searchSequence;
             ++chartSequence;
